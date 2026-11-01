@@ -36,7 +36,7 @@ jobs:
           git clone --depth 1 https://github.com/ggml-org/whisper.cpp
           git clone --depth 1 https://github.com/openai/whisper openai-whisper
           cmake -S whisper.cpp -B whisper.cpp/build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF
-          cmake --build whisper.cpp/build -j --target quantize
+          cmake --build whisper.cpp/build -j --target whisper-quantize
       - name: Download HF model
         run: |
           python - <<'PY'
@@ -65,7 +65,7 @@ jobs:
           if [ "${{ inputs.quant }}" = "none" ]; then
             cp out/ggml-model.bin "out/$base.bin"
           else
-            ./whisper.cpp/build/bin/quantize out/ggml-model.bin "out/$base-${{ inputs.quant }}.bin" ${{ inputs.quant }}
+            ./whisper.cpp/build/bin/whisper-quantize out/ggml-model.bin "out/$base-${{ inputs.quant }}.bin" ${{ inputs.quant }}
           fi
           rm out/ggml-model.bin
           cd out && sha256sum *.bin | tee SHA256SUMS && ls -la
