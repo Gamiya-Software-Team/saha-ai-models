@@ -47,14 +47,15 @@ jobs:
           ls -la hfmodel
       - name: Convert to ggml
         run: |
-          # convert-h5-to-ggml.py reads pytorch_model.bin; create it from safetensors if needed
-          python - <<'PY'
-          import os, torch
-          if not os.path.exists("hfmodel/pytorch_model.bin"):
-              from transformers import WhisperForConditionalGeneration
-              m = WhisperForConditionalGeneration.from_pretrained("hfmodel")
-              torch.save(m.state_dict(), "hfmodel/pytorch_model.bin")
-          PY
+          # convert-h5-to-ggml.py needs vocab.json + added_tokens.json (same tokenizer for all whisper sizes)
+          python - <<'PY2'
+          import os, shutil
+          from huggingface_hub import hf_hub_download
+          for f in ["vocab.json", "added_tokens.json"]:
+              if not os.path.exists(f"hfmodel/{f}"):
+                  shutil.copy(hf_hub_download("openai/whisper-small", f), f"hfmodel/{f}")
+                  print("copied", f, "from openai/whisper-small")
+          PY2
           mkdir -p out
           python whisper.cpp/models/convert-h5-to-ggml.py hfmodel openai-whisper out
           ls -la out
