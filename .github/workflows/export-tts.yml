@@ -4,9 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       hf_model:
-        description: "Hugging Face VITS TTS model id"
+        description: "Hugging Face VITS (transformers) TTS model id to export"
         required: true
-        default: "facebook/mms-tts-sin"
+        default: "tharushaudana/mms-tts-sinhala-custom-vocab-v2"
+      compare:
+        description: "Extra models to compare: vits:<id> or piper:<id>, comma-separated"
+        required: false
+        default: "vits:deathlegionteam/sinhala-tts-vits,piper:chan4lk/piper-tts-sinhala,piper:intellisr/sinhala-tts-piper-v1"
       tag:
         description: "Release tag (empty = test only, no release)"
         required: false
@@ -28,8 +32,21 @@ jobs:
         run: |
           pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
           pip install --quiet transformers==4.46.3 huggingface_hub onnx onnxruntime soundfile librosa jiwer numpy
+          pip install --quiet piper-phonemize || echo 'piper-phonemize not available'
       - name: Discover
         run: python tools/tts_export.py discover
+      - name: Compare other Sinhala TTS models
+        if: ${{ inputs.compare != '' }}
+        shell: bash
+        continue-on-error: true
+        run: |
+          mkdir -p cmp
+          IFS=',' read -ra M <<< "${{ inputs.compare }}"
+          for m in "${M[@]}"; do
+            kind="${m%%:*}"; id="${m#*:}"
+            if [ "$kind" = "piper" ]; then python tools/tts_export.py piper "$id" cmp || true
+            else python tools/tts_export.py export "$id" "cmp/$(echo $id | tr / _)" || true; fi
+          done
       - name: Export + check
         shell: bash
         run: set -o pipefail; python tools/tts_export.py export "${{ inputs.hf_model }}" out | tee export.txt
@@ -37,7 +54,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tts-samples
-          path: out/*.wav
+          path: |
+            out/*.wav
+            cmp/**/*.wav
       - name: Publish release
         if: ${{ inputs.tag != '' }}
         env:

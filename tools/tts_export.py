@@ -113,34 +113,94 @@ def export(model_id, out_dir):
 
     # 5) ONNX synthesis + ASR round trip
     import onnxruntime as ort
-    from transformers import pipeline
-    import librosa, jiwer
-    asr = pipeline("automatic-speech-recognition", model="SinhaSpeech/whisper-small-sinhala-run12-best", device="cpu")
     for variant in ["model.onnx", "model.int8.onnx"]:
         p = f"{out_dir}/{variant}"
         if not os.path.exists(p):
             continue
         sess = ort.InferenceSession(p)
-        refs, hyps, rtf = [], [], []
-        for i, s in enumerate(SENTENCES):
-            x = np.array([my_ids(s)], dtype=np.int64)
-            t0 = time.time()
-            wav = sess.run(None, {"input_ids": x})[0][0]
-            dt = time.time() - t0
-            rtf.append(dt / (len(wav) / sr))
-            sf.write(f"{out_dir}/{variant}_{i}.wav", wav, sr)
-            w16 = librosa.resample(wav.astype("float32"), orig_sr=sr, target_sr=16000) if sr != 16000 else wav
-            h = asr({"raw": w16.astype("float32"), "sampling_rate": 16000},
-                    generate_kwargs={"language": "sinhala", "task": "transcribe"})["text"]
-            refs.append(norm(s)); hyps.append(norm(h))
-            print(f"[{variant}] TTS: {s}\n[{variant}] ASR: {h}")
-        cer = jiwer.cer(refs, hyps) * 100
-        print(f"RESULT {model_id} {variant}: size {os.path.getsize(p)/1e6:.0f}MB  round-trip CER {cer:.1f}%  "
-              f"RTF {np.mean(rtf):.3f} (runner CPU)")
+        roundtrip(f"vits:{model_id}:{variant}",
+                  lambda s: sess.run(None, {"input_ids": np.array([my_ids(s)], dtype=np.int64)})[0][0],
+                  sr, out_dir, os.path.getsize(p) / 1e6)
+
+
+def roundtrip(label, synth, sr, out_dir, size_mb):
+    """synth(text) -> float waveform. Prints round-trip CER via Sinhala ASR."""
+    import numpy as np, soundfile as sf, librosa, jiwer
+    from transformers import pipeline
+    global _ASR
+    try:
+        _ASR
+    except NameError:
+        _ASR = pipeline("automatic-speech-recognition", model="SinhaSpeech/whisper-small-sinhala-run12-best", device="cpu")
+    refs, hyps, rtf = [], [], []
+    safe = label.replace("/", "_")
+    for i, s in enumerate(SENTENCES):
+        t0 = time.time()
+        wav = np.asarray(synth(s), dtype="float32").reshape(-1)
+        dt = time.time() - t0
+        rtf.append(dt / max(0.01, len(wav) / sr))
+        sf.write(f"{out_dir}/{safe}_{i}.wav", wav, sr)
+        w16 = librosa.resample(wav, orig_sr=sr, target_sr=16000) if sr != 16000 else wav
+        h = _ASR({"raw": w16.astype("float32"), "sampling_rate": 16000},
+                 generate_kwargs={"language": "sinhala", "task": "transcribe"})["text"]
+        refs.append(norm(s)); hyps.append(norm(h))
+        print(f"[{label}] TTS: {s}\n[{label}] ASR: {h}")
+    cer = jiwer.cer(refs, hyps) * 100
+    print(f"RESULT {label}: size {size_mb:.0f}MB  round-trip CER {cer:.1f}%  RTF {np.mean(rtf):.3f}", flush=True)
+
+
+def piper(model_id, out_dir):
+    """Piper (VITS ONNX) model. Works on-device only if phoneme_type is text (no espeak needed)."""
+    import numpy as np, onnxruntime as ort
+    from huggingface_hub import HfApi, hf_hub_download
+    files = HfApi().list_repo_files(model_id)
+    onnx_f = [f for f in files if f.endswith(".onnx")]
+    cfg_f = [f for f in files if f.endswith(".onnx.json") or f.endswith("config.json")]
+    print(model_id, "files:", files[:30])
+    if not onnx_f or not cfg_f:
+        print(f"RESULT {model_id}: not a piper model"); return
+    cfg = json.load(open(hf_hub_download(model_id, cfg_f[0]), encoding="utf-8"))
+    ptype = cfg.get("phoneme_type", "espeak")
+    print(model_id, "phoneme_type:", ptype, "espeak voice:", cfg.get("espeak", {}), "sr:", cfg.get("audio", {}).get("sample_rate"))
+    pmap = cfg["phoneme_id_map"]
+    sr = cfg["audio"]["sample_rate"]
+    inf = cfg.get("inference", {})
+    scales = np.array([inf.get("noise_scale", 0.667), inf.get("length_scale", 1.0), inf.get("noise_w", 0.8)], dtype=np.float32)
+    path = hf_hub_download(model_id, onnx_f[0])
+    sess = ort.InferenceSession(path)
+
+    def phonemes(text):
+        if ptype == "text":
+            return list(unicodedata.normalize("NFD", text))
+        try:
+            from piper_phonemize import phonemize_espeak
+            voice = cfg.get("espeak", {}).get("voice", "si")
+            return [p for sent in phonemize_espeak(text, voice) for p in sent]
+        except Exception as e:
+            raise RuntimeError(f"espeak phonemizer needed: {e}")
+
+    def synth(text):
+        ids = list(pmap["^"])
+        for ph in phonemes(text):
+            if ph in pmap:
+                ids += pmap[ph] + pmap["_"]
+        ids += pmap["$"]
+        x = np.array([ids], dtype=np.int64)
+        feeds = {"input": x, "input_lengths": np.array([x.shape[1]], dtype=np.int64), "scales": scales}
+        if "sid" in [i.name for i in sess.get_inputs()]:
+            feeds["sid"] = np.array([0], dtype=np.int64)
+        return sess.run(None, feeds)[0]
+
+    try:
+        roundtrip(f"piper:{model_id}[{ptype}]", synth, sr, out_dir, os.path.getsize(path) / 1e6)
+    except Exception as e:
+        print(f"RESULT {model_id}: FAILED {type(e).__name__}: {e}")
 
 
 if __name__ == "__main__":
     if sys.argv[1] == "discover":
         discover()
+    elif sys.argv[1] == "piper":
+        piper(sys.argv[2], sys.argv[3])
     else:
         export(sys.argv[2], sys.argv[3])
