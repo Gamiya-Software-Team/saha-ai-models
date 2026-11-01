@@ -1,0 +1,77 @@
+name: Convert whisper model to ggml
+
+on:
+  workflow_dispatch:
+    inputs:
+      hf_model:
+        description: "Hugging Face whisper model id"
+        required: true
+      name:
+        description: "Output base name, e.g. whisper-small-si"
+        required: true
+      quant:
+        description: "ggml quantization (q5_0, q8_0, none)"
+        required: true
+        default: "q5_0"
+      tag:
+        description: "Release tag"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Tools
+        run: |
+          pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
+          pip install --quiet transformers==4.46.3 huggingface_hub numpy
+          git clone --depth 1 https://github.com/ggml-org/whisper.cpp
+          git clone --depth 1 https://github.com/openai/whisper openai-whisper
+          cmake -S whisper.cpp -B whisper.cpp/build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF
+          cmake --build whisper.cpp/build -j --target quantize
+      - name: Download HF model
+        run: |
+          python - <<'PY'
+          from huggingface_hub import snapshot_download
+          snapshot_download("${{ inputs.hf_model }}", local_dir="hfmodel",
+                            allow_patterns=["*.json", "*.bin", "*.safetensors", "*.txt", "*.model"])
+          PY
+          ls -la hfmodel
+      - name: Convert to ggml
+        run: |
+          # convert-h5-to-ggml.py reads pytorch_model.bin; create it from safetensors if needed
+          python - <<'PY'
+          import os, torch
+          if not os.path.exists("hfmodel/pytorch_model.bin"):
+              from transformers import WhisperForConditionalGeneration
+              m = WhisperForConditionalGeneration.from_pretrained("hfmodel")
+              torch.save(m.state_dict(), "hfmodel/pytorch_model.bin")
+          PY
+          mkdir -p out
+          python whisper.cpp/models/convert-h5-to-ggml.py hfmodel openai-whisper out
+          ls -la out
+      - name: Quantize + checksum
+        run: |
+          base="${{ inputs.name }}"
+          if [ "${{ inputs.quant }}" = "none" ]; then
+            cp out/ggml-model.bin "out/$base.bin"
+          else
+            ./whisper.cpp/build/bin/quantize out/ggml-model.bin "out/$base-${{ inputs.quant }}.bin" ${{ inputs.quant }}
+          fi
+          rm out/ggml-model.bin
+          cd out && sha256sum *.bin | tee SHA256SUMS && ls -la
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ inputs.tag }}" out/*.bin out/SHA256SUMS \
+            --title "${{ inputs.tag }}" \
+            --notes "Converted from https://huggingface.co/${{ inputs.hf_model }} (quant: ${{ inputs.quant }}) with whisper.cpp for the Saha AI app."
