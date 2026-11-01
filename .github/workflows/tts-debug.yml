@@ -1,0 +1,21 @@
+name: TTS debug
+on:
+  workflow_dispatch:
+jobs:
+  dbg:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: |
+          pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
+          pip install --quiet transformers==4.46.3 huggingface_hub onnx onnxruntime soundfile librosa jiwer numpy piper-phonemize
+      - name: espeak Sinhala phonemes
+        working-directory: tools
+        run: python tts_debug.py espeak
+      - name: VITS with HF tokenizer
+        working-directory: tools
+        run: python tts_debug.py vits tharushaudana/mms-tts-sinhala-custom-vocab-v2 ../out
