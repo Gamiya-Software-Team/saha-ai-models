@@ -1,0 +1,54 @@
+name: Export Sinhala TTS to ONNX
+
+on:
+  workflow_dispatch:
+    inputs:
+      hf_model:
+        description: "Hugging Face VITS TTS model id"
+        required: true
+        default: "facebook/mms-tts-sin"
+      tag:
+        description: "Release tag (empty = test only, no release)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: |
+          pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
+          pip install --quiet transformers==4.46.3 huggingface_hub onnx onnxruntime soundfile librosa jiwer numpy
+      - name: Discover
+        run: python tools/tts_export.py discover
+      - name: Export + check
+        shell: bash
+        run: set -o pipefail; python tools/tts_export.py export "${{ inputs.hf_model }}" out | tee export.txt
+      - name: Upload samples
+        uses: actions/upload-artifact@v4
+        with:
+          name: tts-samples
+          path: out/*.wav
+      - name: Publish release
+        if: ${{ inputs.tag != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd out
+          mkdir -p rel
+          name=$(echo "${{ inputs.hf_model }}" | tr '/' '-')
+          cp model.int8.onnx "rel/$name.int8.onnx" 2>/dev/null || true
+          cp model.onnx "rel/$name.onnx"
+          cp tokens.json "rel/$name.tokens.json"
+          cd rel && sha256sum * | tee SHA256SUMS && ls -la
+          gh release create "${{ inputs.tag }}" * --title "${{ inputs.tag }}" \
+            --notes "ONNX export of https://huggingface.co/${{ inputs.hf_model }} for the Saha AI app. Original licence applies (MMS-TTS: CC BY-NC 4.0, non-commercial)."
