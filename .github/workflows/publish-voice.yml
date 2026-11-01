@@ -1,0 +1,56 @@
+name: Publish Sinhala voice bundle
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag"
+        required: true
+        default: "voice-v1"
+
+permissions:
+  contents: write
+
+env:
+  ESPEAK_FORK_COMMIT: 0f65aa301e0d6bae5e172cc74197d32a6182200f   # rhasspy/espeak-ng used by piper-phonemize
+  PIPER_MODEL: intellisr/sinhala-tts-piper-v1
+
+jobs:
+  voice:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build espeak-ng data (piper fork)
+        run: |
+          git clone --quiet https://github.com/rhasspy/espeak-ng espeak
+          git -C espeak checkout --quiet $ESPEAK_FORK_COMMIT
+          cmake -S espeak -B espeak/build -DCMAKE_BUILD_TYPE=Release -DUSE_MBROLA=OFF -DUSE_LIBSONIC=OFF \
+            -DUSE_LIBPCAUDIO=OFF -DUSE_KLATT=OFF -DUSE_SPEECHPLAYER=OFF -DUSE_ASYNC=OFF -DENABLE_TESTS=OFF
+          cmake --build espeak/build -j
+          D=espeak/build/espeak-ng-data
+          mkdir -p out/espeak-ng-data
+          cp $D/phontab $D/phonindex $D/phondata $D/intonations $D/si_dict $D/en_dict out/espeak-ng-data/
+          cp -r $D/lang out/espeak-ng-data/
+          (cd out && zip -qr espeak-ng-data-si-en.zip espeak-ng-data && rm -rf espeak-ng-data)
+      - name: Download Piper Sinhala model
+        run: |
+          pip install --quiet huggingface_hub
+          python - <<'PY'
+          import shutil
+          from huggingface_hub import hf_hub_download, HfApi
+          repo = "${{ env.PIPER_MODEL }}"
+          for src, dst in [("model.onnx", "si_LK-intellisr-v1.onnx"), ("model.onnx.json", "si_LK-intellisr-v1.onnx.json"), ("README.md", "si_LK-intellisr-v1.README.md")]:
+              shutil.copy(hf_hub_download(repo, src), f"out/{dst}")
+          info = HfApi().model_info(repo)
+          print("license:", (info.card_data or {}).get("license") if info.card_data else None)
+          PY
+          echo "---- model card ----"; cat out/si_LK-intellisr-v1.README.md | head -60
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd out && sha256sum * | tee SHA256SUMS && ls -la
+          gh release create "${{ inputs.tag }}" * --title "${{ inputs.tag }}" --notes "Offline Sinhala voice for Saha AI:
+          - Piper model from https://huggingface.co/${{ env.PIPER_MODEL }} (licence: see si_LK-intellisr-v1.README.md)
+          - espeak-ng data (Sinhala + English) built from rhasspy/espeak-ng@${{ env.ESPEAK_FORK_COMMIT }} (GPL-3.0)"
